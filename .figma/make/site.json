@@ -1,0 +1,10 @@
+{
+  "description": "Track personal finances and manage schedules with a sleek glassmorphism design, offering users a comprehensive tool for budgeting and organization.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
