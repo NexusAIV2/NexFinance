@@ -9,6 +9,7 @@
     "preview": "npx vite preview",
     "server": "node server.js",
     "start": "node server.js",
+    "build:start": "npx vite build && node server.js",
     "format": "npx oxfmt"
   },
   "dependencies": {
