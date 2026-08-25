@@ -178,16 +178,69 @@ function getUserIdFromReq(req, urlParams) {
   return req.headers["x-user-id"] || urlParams.get("userId") || null;
 }
 
+// ─── Static File Serving for Full-Stack Deployment ───────────────────────────
+const MIME_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".webapp": "application/x-web-app-manifest+json",
+  ".webmanifest": "application/manifest+json",
+};
+
+function serveStatic(res, pathname) {
+  const distDir = path.join(__dirname, "dist");
+  if (!fs.existsSync(distDir)) return false;
+
+  let safePath = path.normalize(pathname).replace(/^(\.\.[\/\\])+/, '');
+  let filePath = path.join(distDir, safePath);
+
+  if (!filePath.startsWith(distDir)) return false;
+
+  if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || "application/octet-stream";
+    res.writeHead(200, { "Content-Type": contentType });
+    fs.createReadStream(filePath).pipe(res);
+    return true;
+  }
+
+  // SPA Fallback: serve index.html for frontend routes
+  const indexPath = path.join(distDir, "index.html");
+  if (fs.existsSync(indexPath)) {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    fs.createReadStream(indexPath).pipe(res);
+    return true;
+  }
+
+  return false;
+}
+
 // ─── HTTP Server ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   setCorsHeaders(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathname = url.pathname;
   const clientIp = getClientIp(req);
 
   try {
+    // ── Serve Static Assets & SPA Frontend for non-API routes ───────────────
+    if (!pathname.startsWith("/api/") && !pathname.startsWith("/anichin-proxy")) {
+      const served = serveStatic(res, pathname);
+      if (served) return;
+    }
+
     // ── Health Check ────────────────────────────────────────────────────────────
     if (pathname === "/api/v1/health" && req.method === "GET") {
       return sendJson(res, 200, {
@@ -719,8 +772,12 @@ server.on("error", err => {
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Mobile Finance Tracker API v2.1 — http://localhost:${PORT}/api/v1`);
+  console.log(`🚀 Mobile Finance Tracker Server & API — http://localhost:${PORT}`);
+  console.log(`   Web App Frontend : ✅  Serving static dist/ build`);
   console.log(`   Auth validation  : ✅  email · password strength · name rules`);
   console.log(`   Rate limiting    : ✅  ${RATE_LIMIT_MAX} attempts / ${RATE_LIMIT_WINDOW_MS / 1000}s per IP`);
-  console.log(`   Duplicate email  : ✅  checked on register`);
 });
+
+export default function handler(req, res) {
+  server.emit("request", req, res);
+}
