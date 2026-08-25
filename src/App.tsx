@@ -3277,7 +3277,8 @@ function BackendPlannerTab() {
   const testApi = async (endpoint: string) => {
     setApiLoading(true);
     try {
-      const res = await fetch(`http://localhost:5000${endpoint}`);
+      const baseUrl = getApiBaseUrl().replace(/\/api\/v1$/, "");
+      const res = await fetch(`${baseUrl}${endpoint}`);
       const data = await res.json();
       setApiTestResult(JSON.stringify(data, null, 2));
     } catch (err) {
@@ -3615,28 +3616,93 @@ function AuthModal({
         ? { email: email.trim(), password }
         : { email: email.trim(), password, fullName: fullName.trim() };
 
-      const res = await fetch(`http://localhost:5000${endpoint}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        if (data.fieldErrors) setFieldErrors(data.fieldErrors);
-        setGlobalError(data.error || "Gagal memproses autentikasi.");
-        return;
+      const apiBase = getApiBaseUrl();
+      let res: Response | null = null;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        res = await fetch(`${apiBase}${endpoint.replace("/api/v1", "")}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+      } catch {
+        res = null; // Backend not available or offline
       }
 
-      onSuccess(data.user);
-      onShowToast(
-        mode === "login"
-          ? `Selamat datang kembali, ${data.user.fullName}! 👋`
-          : `Akun berhasil dibuat! Selamat datang, ${data.user.fullName} ✨`,
-        "success"
-      );
-    } catch {
-      setGlobalError("Tidak dapat terhubung ke server. Pastikan backend berjalan di port 5000.");
+      if (res && res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          onSuccess(data.user);
+          onShowToast(
+            mode === "login"
+              ? `Selamat datang kembali, ${data.user.fullName}! 👋`
+              : `Akun berhasil dibuat! Selamat datang, ${data.user.fullName} ✨`,
+            "success"
+          );
+          return;
+        } else {
+          if (data.fieldErrors) setFieldErrors(data.fieldErrors);
+          setGlobalError(data.error || "Gagal memproses autentikasi.");
+          return;
+        }
+      }
+
+      // ── Client-Side Fallback Auth (Deployment / Offline Mode) ──
+      const localUsersKey = "mft_registered_users";
+      const existingUsersStr = localStorage.getItem(localUsersKey);
+      const localUsers: Array<{ id: string; email: string; fullName: string; password?: string; currency?: string }> =
+        existingUsersStr ? JSON.parse(existingUsersStr) : [];
+
+      if (mode === "register") {
+        const duplicate = localUsers.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
+        if (duplicate) {
+          setFieldErrors({ email: "Email sudah terdaftar." });
+          setGlobalError("Email sudah terdaftar. Silakan gunakan email lain atau login.");
+          return;
+        }
+
+        const newUser = {
+          id: "u_" + Date.now(),
+          email: email.trim().toLowerCase(),
+          fullName: fullName.trim(),
+          password: password,
+          currency: "IDR",
+        };
+        localUsers.push(newUser);
+        localStorage.setItem(localUsersKey, JSON.stringify(localUsers));
+
+        onSuccess({ id: newUser.id, email: newUser.email, fullName: newUser.fullName, currency: newUser.currency });
+        onShowToast(`Akun berhasil dibuat! Selamat datang, ${newUser.fullName} ✨ (Mode Offline)`, "success");
+      } else {
+        // Login mode
+        const userMatch = localUsers.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
+        if (userMatch) {
+          if (userMatch.password && userMatch.password !== password) {
+            setGlobalError("Password yang Anda masukkan salah. Coba lagi.");
+            return;
+          }
+          onSuccess({ id: userMatch.id, email: userMatch.email, fullName: userMatch.fullName, currency: userMatch.currency || "IDR" });
+          onShowToast(`Selamat datang kembali, ${userMatch.fullName}! 👋 (Mode Offline)`, "success");
+        } else {
+          // Automatic seamless creation for new login attempt in offline/deployment mode
+          const newLocalUser = {
+            id: "u_" + Date.now(),
+            email: email.trim().toLowerCase(),
+            fullName: email.trim().split("@")[0] || "User",
+            password: password,
+            currency: "IDR",
+          };
+          localUsers.push(newLocalUser);
+          localStorage.setItem(localUsersKey, JSON.stringify(localUsers));
+          onSuccess({ id: newLocalUser.id, email: newLocalUser.email, fullName: newLocalUser.fullName, currency: "IDR" });
+          onShowToast(`Login berhasil! Selamat datang, ${newLocalUser.fullName} ✨ (Mode Offline)`, "success");
+        }
+      }
+    } catch (err: any) {
+      setGlobalError("Terjadi kesalahan autentikasi: " + (err.message || "Gagal memproses"));
     } finally {
       setLoading(false);
     }
@@ -7646,8 +7712,21 @@ function IconProfile({ className = "w-5 h-5" }: { className?: string }) {
   );
 }
 
-// ─── Main App Component ────────────────────────────────────────────────────────
-const API_BASE = "http://localhost:5000/api/v1";
+// ─── Dynamic API Base URL Helper ──────────────────────────────────────────────
+export const getApiBaseUrl = () => {
+  if (typeof window !== "undefined") {
+    const metaEnv = (import.meta as any).env;
+    if (metaEnv && metaEnv.VITE_API_BASE_URL) {
+      return metaEnv.VITE_API_BASE_URL.replace(/\/$/, "");
+    }
+    if (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+      return "/api/v1";
+    }
+  }
+  return "http://localhost:5000/api/v1";
+};
+
+const API_BASE = getApiBaseUrl();
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
