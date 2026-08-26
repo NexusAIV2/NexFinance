@@ -1,0 +1,17 @@
+{
+  "auth": {
+    "authorizedDomains": [
+      "localhost",
+      "nexfinance-9d94e.firebaseapp.com",
+      "nexfinance-9d94e.web.app"
+    ],
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": true
+    }
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}

@@ -6,144 +6,7 @@ import crypto from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_FILE = path.join(__dirname, "data", "db.json");
-
 const PORT = process.env.PORT || 5000;
-
-// ─── In-Memory Rate Limiter ────────────────────────────────────────────────────
-// Tracks failed login attempts per IP address
-const loginAttempts = new Map(); // Map<ip, { count: number, resetAt: number }>
-const RATE_LIMIT_MAX  = 5;          // max attempts
-const RATE_LIMIT_WINDOW_MS = 60_000; // per 60 seconds
-
-function checkRateLimit(ip) {
-  const now = Date.now();
-  const record = loginAttempts.get(ip);
-
-  if (!record || now > record.resetAt) {
-    // First attempt or window expired – reset
-    loginAttempts.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return { blocked: false, remaining: RATE_LIMIT_MAX - 1 };
-  }
-
-  if (record.count >= RATE_LIMIT_MAX) {
-    const waitSec = Math.ceil((record.resetAt - now) / 1000);
-    return { blocked: true, waitSec };
-  }
-
-  record.count += 1;
-  return { blocked: false, remaining: RATE_LIMIT_MAX - record.count };
-}
-
-function resetRateLimit(ip) {
-  loginAttempts.delete(ip);
-}
-
-// ─── Validation Helpers ────────────────────────────────────────────────────────
-const EMAIL_REGEX = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
-
-function validateEmail(email) {
-  if (!email || typeof email !== "string") return "Email wajib diisi.";
-  const trimmed = email.trim();
-  if (trimmed.length === 0) return "Email tidak boleh kosong.";
-  if (trimmed.length > 254) return "Email terlalu panjang.";
-  if (!EMAIL_REGEX.test(trimmed)) return "Format email tidak valid. Contoh: nama@email.com";
-  return null; // valid
-}
-
-function validatePassword(password) {
-  if (!password || typeof password !== "string") return "Password wajib diisi.";
-  if (password.length < 8) return "Password minimal 8 karakter.";
-  if (password.length > 128) return "Password terlalu panjang (maks 128 karakter).";
-  if (!/[A-Z]/.test(password)) return "Password harus mengandung minimal satu huruf kapital (A-Z).";
-  if (!/[0-9]/.test(password)) return "Password harus mengandung minimal satu angka (0-9).";
-  if (/\s/.test(password)) return "Password tidak boleh mengandung spasi.";
-  return null; // valid
-}
-
-function validateFullName(fullName) {
-  if (!fullName || typeof fullName !== "string") return "Nama lengkap wajib diisi.";
-  const trimmed = fullName.trim();
-  if (trimmed.length < 2) return "Nama lengkap minimal 2 karakter.";
-  if (trimmed.length > 80) return "Nama lengkap terlalu panjang (maks 80 karakter).";
-  if (/[0-9]/.test(trimmed)) return "Nama lengkap tidak boleh mengandung angka.";
-  if (/[^a-zA-Z\s\u00C0-\u024F\u1E00-\u1EFF'-]/.test(trimmed)) {
-    return "Nama lengkap hanya boleh berisi huruf, spasi, tanda hubung, dan apostrof.";
-  }
-  return null; // valid
-}
-
-// ─── OpenRouter AI Engine Helper ──────────────────────────────────────────────
-async function callOpenRouterAI({ model = "google/gemini-2.5-flash:free", systemPrompt, messages, apiKey }) {
-  const effectiveKey = apiKey || process.env.OPENROUTER_API_KEY || "";
-
-  if (effectiveKey) {
-    try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${effectiveKey}`,
-          "HTTP-Referer": "http://localhost:5000",
-          "X-Title": "Mobile Finance Tracker App",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: model || "google/gemini-2.5-flash:free",
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...messages,
-          ],
-          temperature: 0.7,
-          max_tokens: 1500,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content;
-        if (content) {
-          return { success: true, provider: "openrouter", model, reply: content };
-        }
-      } else {
-        const errText = await response.text();
-        console.warn("[OpenRouter API Warning] Fallback triggered:", response.status, errText);
-      }
-    } catch (err) {
-      console.warn("[OpenRouter API Error] Fallback triggered:", err.message);
-    }
-  }
-
-  // Smart Local Fallback AI Engine if no key or API call fails
-  return { success: true, provider: "local_engine", model: "smart-local-ai", reply: null };
-}
-
-// ─── DB Helpers ────────────────────────────────────────────────────────────────
-const initialData = {
-  users: [],
-  transactions: [],
-  budgets: [],
-  schedules: [],
-};
-
-function ensureDbExists() {
-  const dir = path.dirname(DB_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
-}
-
-function readDb() {
-  ensureDbExists();
-  try {
-    return JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
-  } catch {
-    return { ...initialData };
-  }
-}
-
-function writeDb(data) {
-  ensureDbExists();
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
 
 // ─── HTTP Helpers ──────────────────────────────────────────────────────────────
 function setCorsHeaders(res) {
@@ -252,250 +115,15 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // ── Auth Register ───────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/auth/register" && req.method === "POST") {
-      const body = await parseBody(req);
-      const { email, password, fullName } = body;
-
-      // ── Field validations ────────────────────────────────────────────────────
-      const fieldErrors = {};
-      const emailErr    = validateEmail(email);
-      const passwordErr = validatePassword(password);
-      const nameErr     = validateFullName(fullName);
-
-      if (emailErr)    fieldErrors.email    = emailErr;
-      if (passwordErr) fieldErrors.password = passwordErr;
-      if (nameErr)     fieldErrors.fullName = nameErr;
-
-      if (Object.keys(fieldErrors).length > 0) {
-        return sendJson(res, 400, {
-          success: false,
-          error: Object.values(fieldErrors)[0], // First error for modal display
-          fieldErrors,
-        });
-      }
-
-      // ── Duplicate email check ────────────────────────────────────────────────
-      const db = readDb();
-      const existing = db.users.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
-      if (existing) {
-        return sendJson(res, 409, {
-          success: false,
-          error: "Email sudah terdaftar. Silakan gunakan email lain atau login.",
-          fieldErrors: { email: "Email sudah terdaftar." },
-        });
-      }
-
-      const newUser = {
-        id: "u_" + Date.now(),
-        email: email.trim().toLowerCase(),
-        fullName: fullName.trim(),
-        // NOTE: In production replace this with bcrypt hash
-        password: password,
-        currency: "IDR",
-        createdAt: new Date().toISOString(),
-        loginCount: 0,
-      };
-
-      db.users.push(newUser);
-      writeDb(db);
-
-      console.log(`[REGISTER] New user: ${newUser.email} (${newUser.id})`);
-
-      const userPublic = { id: newUser.id, email: newUser.email, fullName: newUser.fullName, currency: newUser.currency };
-      return sendJson(res, 201, {
-        success: true,
-        message: "Registrasi berhasil.",
-        accessToken: "token_" + newUser.id + "_" + Date.now(),
-        user: userPublic,
-      });
-    }
-
-    // ── Auth Login ──────────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/auth/login" && req.method === "POST") {
-      // ── Rate limiting: block if too many failed attempts ─────────────────────
-      const rateCheck = checkRateLimit(clientIp);
-      if (rateCheck.blocked) {
-        return sendJson(res, 429, {
-          success: false,
-          error: `Terlalu banyak percobaan login. Coba lagi dalam ${rateCheck.waitSec} detik.`,
-        });
-      }
-
-      const body = await parseBody(req);
-      const { email, password } = body;
-
-      // ── Basic presence check ────────────────────────────────────────────────
-      const fieldErrors = {};
-      if (!email || !email.trim()) fieldErrors.email = "Email wajib diisi.";
-      else if (!EMAIL_REGEX.test(email.trim())) fieldErrors.email = "Format email tidak valid.";
-      if (!password) fieldErrors.password = "Password wajib diisi.";
-
-      if (Object.keys(fieldErrors).length > 0) {
-        return sendJson(res, 400, {
-          success: false,
-          error: Object.values(fieldErrors)[0],
-          fieldErrors,
-        });
-      }
-
-      const db = readDb();
-      const user = db.users.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
-
-      // ── Unified error message to avoid user enumeration ─────────────────────
-      if (!user || user.password !== password) {
-        console.warn(`[LOGIN FAIL] ip=${clientIp} email=${email}`);
-        return sendJson(res, 401, {
-          success: false,
-          error: "Email atau password salah. Periksa kembali dan coba lagi.",
-          fieldErrors: { email: " ", password: "Kredensial tidak cocok." },
-        });
-      }
-
-      // ── Success: reset rate limit, update login count ────────────────────────
-      resetRateLimit(clientIp);
-      user.loginCount = (user.loginCount || 0) + 1;
-      user.lastLoginAt = new Date().toISOString();
-      writeDb(db);
-
-      console.log(`[LOGIN OK] user=${user.email} count=${user.loginCount}`);
-
-      const userPublic = { id: user.id, email: user.email, fullName: user.fullName, currency: user.currency };
-      return sendJson(res, 200, {
-        success: true,
-        message: "Login berhasil.",
-        accessToken: "token_" + user.id + "_" + Date.now(),
-        user: userPublic,
-      });
-    }
-
-    // ── Get User Transactions ───────────────────────────────────────────────────
-    if (pathname === "/api/v1/transactions" && req.method === "GET") {
-      const userId = getUserIdFromReq(req, url.searchParams);
-      const db = readDb();
-      const userTx = userId ? db.transactions.filter(t => t.userId === userId) : db.transactions;
-      return sendJson(res, 200, { success: true, count: userTx.length, data: userTx });
-    }
-
-    // ── Add Transaction ─────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/transactions" && req.method === "POST") {
-      const body = await parseBody(req);
-      const userId = body.userId || getUserIdFromReq(req, url.searchParams);
-      const db = readDb();
-      const newTx = {
-        id: body.id || Date.now().toString(),
-        userId: userId || "anonymous",
-        type: body.type || "expense",
-        amount: Number(body.amount) || 0,
-        category: body.category || "Lainnya",
-        note: body.note || "Transaksi Baru",
-        date: body.date || new Date().toISOString().slice(0, 10),
-        paymentMethod: body.paymentMethod || "Tunai",
-      };
-      db.transactions.unshift(newTx);
-      writeDb(db);
-      return sendJson(res, 201, { success: true, message: "Transaksi berhasil dicatat", data: newTx });
-    }
-
-    // ── Delete Transaction ──────────────────────────────────────────────────────
-    if (pathname.startsWith("/api/v1/transactions/") && req.method === "DELETE") {
-      const id = pathname.split("/").pop();
-      const db = readDb();
-      db.transactions = db.transactions.filter(t => t.id !== id);
-      writeDb(db);
-      return sendJson(res, 200, { success: true, message: "Transaksi berhasil dihapus" });
-    }
-
-    // ── Get User Budgets ────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/budgets" && req.method === "GET") {
-      const userId = getUserIdFromReq(req, url.searchParams);
-      const db = readDb();
-      const userBudgets = userId ? db.budgets.filter(b => b.userId === userId) : db.budgets;
-      return sendJson(res, 200, { success: true, data: userBudgets });
-    }
-
-    // ── Set Budget ──────────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/budgets" && req.method === "POST") {
-      const body = await parseBody(req);
-      const userId = body.userId || getUserIdFromReq(req, url.searchParams);
-      const db = readDb();
-      const existing = db.budgets.find(b => (b.id === body.id || b.category === body.category) && b.userId === userId);
-      if (existing) {
-        existing.limit = Number(body.limit) || existing.limit;
-      } else {
-        db.budgets.push({
-          id: body.id || Date.now().toString(),
-          userId: userId || "anonymous",
-          category: body.category || "Lainnya",
-          limit: Number(body.limit) || 500000,
-          icon: body.icon || "✨",
-          color: body.color || "#8b5cf6",
-        });
-      }
-      writeDb(db);
-      return sendJson(res, 200, { success: true, message: "Anggaran berhasil disimpan", data: db.budgets });
-    }
-
-    // ── Get User Schedules ──────────────────────────────────────────────────────
-    if (pathname === "/api/v1/schedules" && req.method === "GET") {
-      const userId = getUserIdFromReq(req, url.searchParams);
-      const db = readDb();
-      const userSchedules = userId ? db.schedules.filter(s => s.userId === userId) : db.schedules;
-      return sendJson(res, 200, { success: true, data: userSchedules });
-    }
-
-    // ── Add Schedule ────────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/schedules" && req.method === "POST") {
-      const body = await parseBody(req);
-      const userId = body.userId || getUserIdFromReq(req, url.searchParams);
-      const db = readDb();
-      const newEv = {
-        id: body.id || Date.now().toString(),
-        userId: userId || "anonymous",
-        title: body.title || "Agenda Baru",
-        date: body.date || new Date().toISOString().slice(0, 10),
-        time: body.time || "09:00",
-        type: body.type || "task",
-        recurring: body.recurring || "none",
-        done: false,
-        note: body.note || "",
-      };
-      db.schedules.push(newEv);
-      writeDb(db);
-      return sendJson(res, 201, { success: true, message: "Agenda berhasil dibuat", data: newEv });
-    }
-
-    // ── Toggle Schedule Done ────────────────────────────────────────────────────
-    if (pathname.startsWith("/api/v1/schedules/") && pathname.endsWith("/toggle") && req.method === "PATCH") {
-      const parts = pathname.split("/");
-      const id = parts[parts.length - 2];
-      const db = readDb();
-      const item = db.schedules.find(s => s.id === id);
-      if (item) {
-        item.done = !item.done;
-        writeDb(db);
-        return sendJson(res, 200, { success: true, data: item });
-      }
-      return sendJson(res, 404, { success: false, message: "Agenda tidak ditemukan" });
-    }
-
-    // ── Admin: Clear DB ─────────────────────────────────────────────────────────
-    if (pathname === "/api/v1/admin/clear" && req.method === "POST") {
-      writeDb(initialData);
-      return sendJson(res, 200, { success: true, message: "Database dibersihkan total" });
-    }
-
     // ── OpenRouter AI: Financial Summary & User Management Analysis ───────────
     if (pathname === "/api/v1/ai/summarize" && req.method === "POST") {
       const body = await parseBody(req);
-      const { userContext, model, apiKey } = body;
+      const { userContext, model, apiKey, transactions = [], budgets = [], schedules = [] } = body;
 
-      const db = readDb();
-      const userId = userContext?.id || getUserIdFromReq(req, url.searchParams);
-      const user = db.users.find(u => u.id === userId) || userContext || { fullName: "Pengguna", currency: "IDR", loginCount: 1 };
-      const userTx = db.transactions.filter(t => !userId || t.userId === userId);
-      const userBudgets = db.budgets.filter(b => !userId || b.userId === userId);
-      const userSchedules = db.schedules.filter(s => !userId || s.userId === userId);
+      const user = userContext || { fullName: "Pengguna", currency: "IDR", loginCount: 1 };
+      const userTx = Array.isArray(transactions) ? transactions : [];
+      const userBudgets = Array.isArray(budgets) ? budgets : [];
+      const userSchedules = Array.isArray(schedules) ? schedules : [];
 
       const income = userTx.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
       const expense = userTx.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
@@ -590,19 +218,17 @@ ${savingsRate >= 20
     // ── OpenRouter AI: Interactive Chatbot (Free Q&A) ───────────────────────────
     if (pathname === "/api/v1/ai/chat" && req.method === "POST") {
       const body = await parseBody(req);
-      const { message, history = [], userContext, model, apiKey } = body;
+      const { message, history = [], userContext, model, apiKey, financialContext } = body;
 
       if (!message || !message.trim()) {
         return sendJson(res, 400, { success: false, error: "Pesan tidak boleh kosong." });
       }
 
-      const db = readDb();
-      const userId = userContext?.id || getUserIdFromReq(req, url.searchParams);
-      const user = db.users.find(u => u.id === userId) || userContext || { fullName: "Pengguna", currency: "IDR" };
-      const userTx = db.transactions.filter(t => !userId || t.userId === userId);
-      const income = userTx.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
-      const expense = userTx.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
-      const balance = income - expense;
+      const user = userContext || { fullName: "Pengguna", currency: "IDR" };
+      const balance = financialContext?.balance || 0;
+      const income = financialContext?.income || 0;
+      const expense = financialContext?.expense || 0;
+      const txCount = financialContext?.totalTx || 0;
 
       const systemPrompt = `Anda adalah Antigravity AI Assistant, asisten kecerdasan buatan serbaguna yang terintegrasi di aplikasi Mobile Finance Tracker.
 Anda dapat menjawab pertanyaan pengguna tentang keuangan maupun topik umum secara GRATIS!
@@ -612,7 +238,7 @@ Data keuangan pengguna saat ini:
 - Total Saldo: ${user.currency || "IDR"} ${balance.toLocaleString()}
 - Total Pemasukan: ${user.currency || "IDR"} ${income.toLocaleString()}
 - Total Pengeluaran: ${user.currency || "IDR"} ${expense.toLocaleString()}
-- Jumlah Transaksi: ${userTx.length}
+- Jumlah Transaksi: ${txCount}
 
 Tanggapi pertanyaan dalam Bahasa Indonesia yang ramah, informatif, dan solutif dengan format Markdown.`;
 
@@ -648,7 +274,7 @@ Tanggapi pertanyaan dalam Bahasa Indonesia yang ramah, informatif, dan solutif d
       } else if (lowerMsg.includes("siapa kamu") || lowerMsg.includes("ai")) {
         fallbackReply = `Saya adalah **Antigravity AI Assistant**, AI cerdas yang siap membantu Anda mengelola keuangan, memberikan rekomendasi budget, serta menjawab pertanyaan umum apapun secara GRATIS! 🤖✨`;
       } else {
-        fallbackReply = `Terima kasih atas pertanyaannya! Berdasarkan catatan Anda, Anda memiliki **${userTx.length} transaksi** dengan total saldo **${user.currency || "IDR"} ${balance.toLocaleString("id-ID")}**.\n\nJika ada topik tertentu mengenai perencanaan budget, cara berinvestasi, atau tips finansial harian yang ingin Anda diskusikan, silakan tanyakan kepada saya! 🚀`;
+        fallbackReply = `Terima kasih atas pertanyaannya! Berdasarkan catatan Anda, Anda memiliki **${txCount} transaksi** dengan total saldo **${user.currency || "IDR"} ${balance.toLocaleString("id-ID")}**.\n\nJika ada topik tertentu mengenai perencanaan budget, cara berinvestasi, atau tips finansial harian yang ingin Anda diskusikan, silakan tanyakan kepada saya! 🚀`;
       }
 
       return sendJson(res, 200, {

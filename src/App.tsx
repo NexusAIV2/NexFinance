@@ -2,6 +2,23 @@ import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import ShinigamiReader from "./ShinigamiReader";
 import AnichinStreamer from "./AnichinStreamer";
+import {
+  registerWithEmail,
+  loginWithEmail,
+  loginWithGoogle,
+  logoutFirebase,
+  subscribeAuthState,
+  getFirebaseUserTransactions,
+  saveFirebaseTransaction,
+  deleteFirebaseTransaction,
+  getFirebaseUserBudgets,
+  saveFirebaseBudget,
+  deleteFirebaseBudget,
+  getFirebaseUserSchedules,
+  saveFirebaseSchedule,
+  deleteFirebaseSchedule,
+  initFirebase,
+} from "./firebase";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Tab = "dashboard" | "transactions" | "budget" | "schedule" | "ai" | "settings";
@@ -464,13 +481,13 @@ function ConfirmModal({
 }
 
 // ─── Custom Minimalist Glassmorphism Dropdown Select Component ──────────────
-interface CustomDropdownOption<T extends string = string> {
+interface CustomDropdownOption<T extends string | number = string> {
   value: T;
   label: string;
   icon?: React.ReactNode;
 }
 
-function CustomDropdown<T extends string = string>({
+function CustomDropdown<T extends string | number>({
   value,
   options,
   onChange,
@@ -499,9 +516,55 @@ function CustomDropdown<T extends string = string>({
         setIsOpen(false);
       }
     };
+    const handleScrollOrResize = (e: Event) => {
+      if (!isOpen) return;
+      const targetNode = e.target as Node;
+      const portalNode = document.getElementById("dropdown-portal-popover");
+      if (portalNode && (portalNode === targetNode || portalNode.contains(targetNode))) {
+        return;
+      }
+      setIsOpen(false);
+    };
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+      window.removeEventListener("resize", handleScrollOrResize);
+    };
   }, [isOpen, containerEl]);
+
+  // Compute fixed popover position (pure viewport relative, NO window.scrollY)
+  const popoverStyle = useMemo(() => {
+    if (!buttonEl) return {};
+    const rect = buttonEl.getBoundingClientRect();
+    const maxDesiredHeight = 210;
+    const navDockHeight = 90;
+    const availableBelow = window.innerHeight - rect.bottom - navDockHeight;
+    const availableAbove = rect.top - 12;
+
+    const showAbove = availableBelow < 160 && availableAbove > 140;
+    const effectiveMaxHeight = showAbove
+      ? Math.min(maxDesiredHeight, availableAbove)
+      : Math.min(maxDesiredHeight, Math.max(120, availableBelow));
+
+    const top = showAbove
+      ? Math.max(10, rect.top - effectiveMaxHeight - 6)
+      : Math.min(window.innerHeight - navDockHeight - effectiveMaxHeight - 6, rect.bottom + 6);
+
+    const left = Math.max(10, Math.min(rect.left, window.innerWidth - rect.width - 10));
+
+    return {
+      position: "fixed" as const,
+      top: `${top}px`,
+      left: `${left}px`,
+      width: `${Math.max(rect.width, 160)}px`,
+      maxHeight: `${effectiveMaxHeight}px`,
+      backgroundColor: "#0b0e1e",
+      zIndex: 99999,
+    };
+  }, [buttonEl, options.length, isOpen]);
 
   return (
     <div
@@ -515,7 +578,7 @@ function CustomDropdown<T extends string = string>({
         onClick={() => setIsOpen((prev) => !prev)}
         className="w-full flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all duration-200 glass border border-white/15 hover:border-violet-500/50 hover:bg-white/10 active:scale-[0.98] shadow-md focus:outline-none custom-dropdown-btn"
       >
-        <span className="truncate flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
+        <span className="truncate flex items-center gap-1.5 font-semibold text-slate-100">
           {selectedOpt?.icon && <span>{selectedOpt.icon}</span>}
           {selectedOpt ? selectedOpt.label : placeholder}
         </span>
@@ -538,19 +601,14 @@ function CustomDropdown<T extends string = string>({
         createPortal(
           <div
             id="dropdown-portal-popover"
-            className="fixed rounded-2xl p-1.5 z-[9999] shadow-2xl border border-white/20 animate-slide-up select-none custom-dropdown-popover"
-            style={{
-              top: `${buttonEl.getBoundingClientRect().bottom + window.scrollY + 6}px`,
-              left: `${buttonEl.getBoundingClientRect().left + window.scrollX}px`,
-              width: `${buttonEl.getBoundingClientRect().width}px`,
-              minWidth: "160px",
-            }}
+            className="fixed rounded-2xl p-1.5 z-[99999] shadow-2xl border border-white/20 animate-slide-up select-none custom-dropdown-popover overflow-y-auto"
+            style={popoverStyle}
           >
             {options.map((option) => {
               const isSelected = option.value === value;
               return (
                 <button
-                  key={option.value}
+                  key={String(option.value)}
                   type="button"
                   onClick={() => {
                     onChange(option.value);
@@ -621,8 +679,23 @@ function CustomDatePicker({
         setIsOpen(false);
       }
     };
+    const handleScrollOrResize = (e: Event) => {
+      if (!isOpen) return;
+      const targetNode = e.target as Node;
+      const portalNode = document.getElementById("datepicker-portal-popover");
+      if (portalNode && (portalNode === targetNode || portalNode.contains(targetNode))) {
+        return;
+      }
+      setIsOpen(false);
+    };
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+      window.removeEventListener("resize", handleScrollOrResize);
+    };
   }, [isOpen, containerEl]);
 
   const MONTH_NAMES = [
@@ -700,21 +773,31 @@ function CustomDatePicker({
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
   }, []);
 
-  // Compute portal position
+  // Compute portal position (pure viewport relative, NO window.scrollY)
   const portalStyle = useMemo(() => {
     if (!buttonEl) return {};
     const rect = buttonEl.getBoundingClientRect();
-    const popoverWidth = 270;
+    const popoverWidth = 280;
+    const popoverHeight = 310;
     let left = rect.right - popoverWidth;
     if (left < 10) left = rect.left;
     if (left < 10) left = 10;
 
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const showAbove = spaceBelow < popoverHeight + 80 && rect.top > popoverHeight;
+
+    const top = showAbove
+      ? Math.max(10, rect.top - popoverHeight - 6)
+      : Math.min(window.innerHeight - popoverHeight - 75, rect.bottom + 6);
+
     return {
-      top: `${rect.bottom + window.scrollY + 6}px`,
+      position: "fixed" as const,
+      top: `${top}px`,
       left: `${left}px`,
       width: `${popoverWidth}px`,
-      backgroundColor: "#0f172a",
+      backgroundColor: "#0d1126",
       boxShadow: "0 20px 45px rgba(0, 0, 0, 0.95), 0 0 30px rgba(139, 92, 246, 0.4)",
+      zIndex: 99999,
     };
   }, [buttonEl, isOpen]);
 
@@ -3601,6 +3684,32 @@ function AuthModal({
 
   const hasErrors = Object.keys(liveErrors).length > 0;
 
+  const handleGoogleAuth = async () => {
+    setLoading(true);
+    setGlobalError(null);
+    try {
+      const user = await loginWithGoogle();
+      if (user) {
+        onSuccess({
+          id: user.uid,
+          email: user.email || "",
+          fullName: user.displayName || user.email?.split("@")[0] || "User",
+          currency: "IDR",
+        });
+        onShowToast(`Selamat datang, ${user.displayName || "User"}! (Google Sign-In) 🚀`, "success");
+      }
+    } catch (err: any) {
+      console.error("Google Auth error:", err);
+      setGlobalError(
+        err.code === "auth/popup-closed-by-user"
+          ? "Jendela Google Sign-In ditutup."
+          : `Gagal Google Sign-In: ${err.message || "Cek konfigurasi Firebase"}`
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitted(true);
@@ -3610,99 +3719,46 @@ function AuthModal({
     if (Object.keys(errors).length > 0) return;
 
     setLoading(true);
+
+    // ── 1. Primary: Firebase Authentication ──
     try {
-      const endpoint = mode === "login" ? "/api/v1/auth/login" : "/api/v1/auth/register";
-      const payload = mode === "login"
-        ? { email: email.trim(), password }
-        : { email: email.trim(), password, fullName: fullName.trim() };
-
-      const apiBase = getApiBaseUrl();
-      let res: Response | null = null;
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        res = await fetch(`${apiBase}${endpoint.replace("/api/v1", "")}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-      } catch {
-        res = null; // Backend not available or offline
-      }
-
-      if (res && res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          onSuccess(data.user);
-          onShowToast(
-            mode === "login"
-              ? `Selamat datang kembali, ${data.user.fullName}! 👋`
-              : `Akun berhasil dibuat! Selamat datang, ${data.user.fullName} ✨`,
-            "success"
-          );
-          return;
-        } else {
-          if (data.fieldErrors) setFieldErrors(data.fieldErrors);
-          setGlobalError(data.error || "Gagal memproses autentikasi.");
-          return;
-        }
-      }
-
-      // ── Client-Side Fallback Auth (Deployment / Offline Mode) ──
-      const localUsersKey = "mft_registered_users";
-      const existingUsersStr = localStorage.getItem(localUsersKey);
-      const localUsers: Array<{ id: string; email: string; fullName: string; password?: string; currency?: string }> =
-        existingUsersStr ? JSON.parse(existingUsersStr) : [];
-
       if (mode === "register") {
-        const duplicate = localUsers.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
-        if (duplicate) {
-          setFieldErrors({ email: "Email sudah terdaftar." });
-          setGlobalError("Email sudah terdaftar. Silakan gunakan email lain atau login.");
+        const user = await registerWithEmail(email.trim(), password, fullName.trim());
+        if (user) {
+          onSuccess({
+            id: user.uid,
+            email: user.email || "",
+            fullName: fullName.trim(),
+            currency: "IDR",
+          });
+          onShowToast(`Akun Firebase berhasil dibuat! Selamat datang, ${fullName} ✨`, "success");
+          setLoading(false);
           return;
         }
-
-        const newUser = {
-          id: "u_" + Date.now(),
-          email: email.trim().toLowerCase(),
-          fullName: fullName.trim(),
-          password: password,
-          currency: "IDR",
-        };
-        localUsers.push(newUser);
-        localStorage.setItem(localUsersKey, JSON.stringify(localUsers));
-
-        onSuccess({ id: newUser.id, email: newUser.email, fullName: newUser.fullName, currency: newUser.currency });
-        onShowToast(`Akun berhasil dibuat! Selamat datang, ${newUser.fullName} ✨ (Mode Offline)`, "success");
       } else {
-        // Login mode
-        const userMatch = localUsers.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
-        if (userMatch) {
-          if (userMatch.password && userMatch.password !== password) {
-            setGlobalError("Password yang Anda masukkan salah. Coba lagi.");
-            return;
-          }
-          onSuccess({ id: userMatch.id, email: userMatch.email, fullName: userMatch.fullName, currency: userMatch.currency || "IDR" });
-          onShowToast(`Selamat datang kembali, ${userMatch.fullName}! 👋 (Mode Offline)`, "success");
-        } else {
-          // Automatic seamless creation for new login attempt in offline/deployment mode
-          const newLocalUser = {
-            id: "u_" + Date.now(),
-            email: email.trim().toLowerCase(),
-            fullName: email.trim().split("@")[0] || "User",
-            password: password,
+        const user = await loginWithEmail(email.trim(), password);
+        if (user) {
+          onSuccess({
+            id: user.uid,
+            email: user.email || "",
+            fullName: user.displayName || user.email?.split("@")[0] || "User",
             currency: "IDR",
-          };
-          localUsers.push(newLocalUser);
-          localStorage.setItem(localUsersKey, JSON.stringify(localUsers));
-          onSuccess({ id: newLocalUser.id, email: newLocalUser.email, fullName: newLocalUser.fullName, currency: "IDR" });
-          onShowToast(`Login berhasil! Selamat datang, ${newLocalUser.fullName} ✨ (Mode Offline)`, "success");
+          });
+          onShowToast(`Selamat datang kembali, ${user.displayName || "User"}! 🔥`, "success");
+          setLoading(false);
+          return;
         }
       }
-    } catch (err: any) {
-      setGlobalError("Terjadi kesalahan autentikasi: " + (err.message || "Gagal memproses"));
+    } catch (fbErr: any) {
+      console.error("Firebase Auth Error:", fbErr);
+      if (fbErr.code === "auth/email-already-in-use") {
+        setFieldErrors({ email: "Email sudah terdaftar di Firebase Auth." });
+        setGlobalError("Email ini sudah terdaftar. Silakan login atau pilih opsi lain.");
+      } else if (fbErr.code === "auth/wrong-password" || fbErr.code === "auth/user-not-found" || fbErr.code === "auth/invalid-credential") {
+        setGlobalError("Email atau password tidak cocok. Silakan coba lagi.");
+      } else {
+        setGlobalError("Terjadi kesalahan: " + (fbErr.message || "Cek koneksi internet Anda."));
+      }
     } finally {
       setLoading(false);
     }
@@ -3716,15 +3772,15 @@ function AuthModal({
         {/* Header */}
         <div className="text-center space-y-1">
           <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-violet-600 to-cyan-500 mx-auto flex items-center justify-center text-2xl shadow-lg">
-            🔐
+            🔥
           </div>
           <h2 className="text-white font-extrabold text-xl tracking-tight">
-            {mode === "login" ? "Masuk ke Akun" : "Daftar Akun Baru"}
+            {mode === "login" ? "Masuk ke Firebase" : "Daftar Akun Firebase"}
           </h2>
           <p className="text-white/40 text-xs">
             {mode === "login"
-              ? "Kelola keuangan pribadi Anda dengan aman"
-              : "Buat akun pribadi untuk mulai mencatat keuangan"}
+              ? "Kelola keuangan pribadi Anda dengan Firestore Cloud"
+              : "Buat akun baru untuk sinkronisasi cloud real-time"}
           </p>
         </div>
 
@@ -3742,6 +3798,28 @@ function AuthModal({
             }`}>
             ✨ Daftar
           </button>
+        </div>
+
+        {/* Google OAuth Button */}
+        <button
+          type="button"
+          onClick={handleGoogleAuth}
+          disabled={loading}
+          className="w-full py-2.5 px-4 rounded-xl bg-white text-slate-800 hover:bg-slate-100 font-bold text-xs transition-all shadow-md flex items-center justify-center gap-2.5 border border-slate-200 active:scale-95 disabled:opacity-50 cursor-pointer"
+        >
+          <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+          </svg>
+          <span>Lanjutkan dengan Google</span>
+        </button>
+
+        <div className="flex items-center my-2">
+          <div className="flex-1 border-t border-white/10"></div>
+          <span className="px-2 text-[10px] text-white/30 uppercase font-semibold">atau dengan email</span>
+          <div className="flex-1 border-t border-white/10"></div>
         </div>
 
         {/* Global Error Banner */}
@@ -3818,28 +3896,10 @@ function AuthModal({
             </FieldWrap>
           )}
 
-          {/* Password Requirements Checklist */}
-          {mode === "register" && (
-            <div className="glass rounded-xl p-3 space-y-1">
-              <p className="text-white/40 text-[10px] font-bold uppercase tracking-wider mb-1">Syarat Password</p>
-              {[
-                { rule: password.length >= 8,       label: "Minimal 8 karakter" },
-                { rule: /[A-Z]/.test(password),     label: "Minimal 1 huruf kapital (A-Z)" },
-                { rule: /[0-9]/.test(password),     label: "Minimal 1 angka (0-9)" },
-                { rule: !/\s/.test(password) && password.length > 0, label: "Tanpa spasi" },
-              ].map(({ rule, label }) => (
-                <p key={label} className="text-[10px] flex items-center gap-1.5">
-                  <span style={{ color: rule ? "#34d399" : "#475569" }}>{rule ? "✓" : "○"}</span>
-                  <span style={{ color: rule ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.3)" }}>{label}</span>
-                </p>
-              ))}
-            </div>
-          )}
-
           {/* Submit */}
           <button type="submit"
             disabled={loading || (submitted && hasErrors)}
-            className="w-full py-3 rounded-xl text-white font-bold text-xs tracking-wider uppercase transition-all shadow-lg mt-1 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full py-3 rounded-xl text-white font-bold text-xs tracking-wider uppercase transition-all shadow-lg mt-1 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             style={{ background: "linear-gradient(135deg, #7c3aed, #4f46e5)" }}>
             {loading ? "⏳ Memproses..."
               : mode === "login" ? "🔑 Masuk Sekarang"
@@ -4221,6 +4281,7 @@ function SettingsTab({
   budget = [],
   events = [],
   onUpdateUser,
+  onImportData,
   language = "ID",
   onLanguageChange,
   onOpenInstallModal,
@@ -4244,6 +4305,7 @@ function SettingsTab({
   budget?: BudgetItem[];
   events?: ScheduleEvent[];
   onUpdateUser?: (updatedUser: User) => void;
+  onImportData?: (data: { transactions: Transaction[]; budget: BudgetItem[]; events: ScheduleEvent[] }) => void;
   language?: Lang;
   onLanguageChange?: (lang: Lang) => void;
   onOpenInstallModal?: () => void;
@@ -4282,9 +4344,13 @@ function SettingsTab({
     }
   }, [currentUser]);
 
-  // Export Data JSON
+  // Export Data JSON — uses Blob for reliable cross-browser download
   const handleExportData = () => {
     try {
+      if (transactions.length === 0 && budget.length === 0 && events.length === 0) {
+        onShowToast("Tidak ada data untuk di-export.", "info");
+        return;
+      }
       const backupData = {
         app: "Mobile Finance Tracker Pro",
         version: "2.4.0",
@@ -4294,16 +4360,22 @@ function SettingsTab({
         budget,
         events,
       };
-      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));
+      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
       const downloadAnchor = document.createElement("a");
-      downloadAnchor.setAttribute("href", dataStr);
-      downloadAnchor.setAttribute("download", `FinanceTracker_Backup_${new Date().toISOString().slice(0, 10)}.json`);
+      downloadAnchor.href = url;
+      downloadAnchor.download = `FinanceTracker_Backup_${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(downloadAnchor);
       downloadAnchor.click();
-      downloadAnchor.remove();
-      onShowToast("Backup data transaksi & jadwal berhasil di-export!", "success");
-    } catch {
-      onShowToast("Gagal melakukan export data.", "alert");
+      document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+      onShowToast(
+        `Backup berhasil! ${transactions.length} transaksi, ${budget.length} budget, ${events.length} jadwal di-export. ✅`,
+        "success"
+      );
+    } catch (err) {
+      console.error("Export error:", err);
+      onShowToast("Gagal melakukan export data. Coba lagi.", "alert");
     }
   };
 
@@ -4689,6 +4761,34 @@ function SettingsTab({
         </div>
       </div>
 
+      {/* Category: Firebase Cloud Database & Firestore */}
+      <div className="glass-card rounded-2xl p-4 space-y-4 border border-amber-500/20 bg-gradient-to-r from-amber-950/20 via-orange-950/20 to-red-950/20">
+        <div className="flex items-center justify-center gap-2 border-b border-white/5 pb-2 text-center">
+          <span className="text-amber-400 text-sm">🔥</span>
+          <h4 className="text-white font-bold text-xs uppercase tracking-wider">Firebase Cloud Infrastructure</h4>
+        </div>
+
+        {/* Project Info & Status */}
+        <div className="flex flex-row items-center justify-between gap-3 text-left">
+          <div className="text-left flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <p className="text-white text-xs font-semibold">Project Firebase</p>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 border border-amber-500/40 text-amber-300">
+                nexfinance-9d94e
+              </span>
+            </div>
+            <p className="text-white/50 text-[11px] mt-0.5">
+              Auth Email/Google & Firestore Realtime Cloud Persistence
+            </p>
+          </div>
+
+          <div className="px-3 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold shrink-0 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span>Cloud Sync Active</span>
+          </div>
+        </div>
+      </div>
+
       {/* Category 3: OpenRouter AI Key Configuration */}
       <div className="glass-card rounded-2xl p-4 space-y-3 border border-violet-500/20 bg-gradient-to-r from-violet-950/20 to-indigo-950/20">
         <div className="flex items-center justify-center gap-2 border-b border-white/5 pb-2 text-center">
@@ -4779,29 +4879,61 @@ function SettingsTab({
               type="file"
               accept=".json"
               className="hidden"
+              // Reset value so the same file can be re-imported
+              onClick={(e) => { (e.target as HTMLInputElement).value = ""; }}
               onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+
                 const fileReader = new FileReader();
-                if (e.target.files && e.target.files[0]) {
-                  fileReader.readAsText(e.target.files[0], "UTF-8");
-                  fileReader.onload = (event) => {
-                    try {
-                      const parsed = JSON.parse(event.target?.result as string);
-                      if (parsed.transactions && Array.isArray(parsed.transactions)) {
-                        localStorage.setItem("mft_transactions", JSON.stringify(parsed.transactions));
-                      }
-                      if (parsed.budget && Array.isArray(parsed.budget)) {
-                        localStorage.setItem("mft_budget", JSON.stringify(parsed.budget));
-                      }
-                      if (parsed.events && Array.isArray(parsed.events)) {
-                        localStorage.setItem("mft_events", JSON.stringify(parsed.events));
-                      }
-                      onShowToast("Data berhasil dipulihkan! Halaman akan memuat ulang.", "success");
-                      setTimeout(() => window.location.reload(), 1200);
-                    } catch {
-                      onShowToast("File backup tidak valid atau rusak.", "alert");
+                fileReader.readAsText(file, "UTF-8");
+                fileReader.onload = (event) => {
+                  try {
+                    const raw = event.target?.result as string;
+                    if (!raw || raw.trim() === "") {
+                      onShowToast("File kosong atau tidak dapat dibaca.", "alert");
+                      return;
                     }
-                  };
-                }
+                    const parsed = JSON.parse(raw);
+
+                    // Validate it is a known backup format
+                    if (!parsed || typeof parsed !== "object") {
+                      onShowToast("Format file backup tidak valid.", "alert");
+                      return;
+                    }
+
+                    const importedTx: Transaction[] = Array.isArray(parsed.transactions) ? parsed.transactions : [];
+                    const importedBudget: BudgetItem[] = Array.isArray(parsed.budget) ? parsed.budget : [];
+                    const importedEvents: ScheduleEvent[] = Array.isArray(parsed.events) ? parsed.events : [];
+
+                    if (importedTx.length === 0 && importedBudget.length === 0 && importedEvents.length === 0) {
+                      onShowToast("File backup tidak mengandung data apapun.", "info");
+                      return;
+                    }
+
+                    // Use callback to update parent state (and push to Firestore if online)
+                    if (onImportData) {
+                      onImportData({ transactions: importedTx, budget: importedBudget, events: importedEvents });
+                      onShowToast(
+                        `Import sukses! ${importedTx.length} transaksi, ${importedBudget.length} budget, ${importedEvents.length} jadwal dipulihkan. ✅`,
+                        "success"
+                      );
+                    } else {
+                      // Fallback: write to localStorage and reload
+                      if (importedTx.length > 0) localStorage.setItem("mft_transactions", JSON.stringify(importedTx));
+                      if (importedBudget.length > 0) localStorage.setItem("mft_budget", JSON.stringify(importedBudget));
+                      if (importedEvents.length > 0) localStorage.setItem("mft_events", JSON.stringify(importedEvents));
+                      onShowToast("Data dipulihkan ke penyimpanan lokal. Memuat ulang...", "success");
+                      setTimeout(() => window.location.reload(), 1200);
+                    }
+                  } catch (parseErr) {
+                    console.error("Import parse error:", parseErr);
+                    onShowToast("File backup tidak valid atau rusak. Pastikan file JSON yang benar.", "alert");
+                  }
+                };
+                fileReader.onerror = () => {
+                  onShowToast("Gagal membaca file. Coba lagi.", "alert");
+                };
               }}
             />
           </label>
@@ -4865,6 +4997,8 @@ function SettingsTab({
         }}
         onCancel={() => setShowLogoutConfirm(false)}
       />
+
+
 
       {/* Edit Profile Modal (Portal) */}
       {showEditProfileModal &&
@@ -6347,7 +6481,7 @@ function AiTab({
   events,
   currentUser,
   currency,
-  language = "id",
+  language = "ID",
   darkMode = true,
   onShowToast,
 }: {
@@ -6358,7 +6492,7 @@ function AiTab({
   currency: Currency;
   language?: Lang;
   darkMode?: boolean;
-  onShowToast: (msg: string, type: "success" | "info" | "alert") => void;
+  onShowToast: (msg: string, type: "success" | "info" | "alert" | "error") => void;
 }) {
   const [subTab, setSubTab] = useState<"chat" | "summary">("chat");
   const [availableModels, setAvailableModels] = useState(OPENROUTER_MODELS);
@@ -7953,8 +8087,8 @@ export default function App() {
     localStorage.setItem("mft_events", JSON.stringify(events));
   }, [events]);
 
-  const showToast = (msg: string, type: "success" | "info" | "alert") => {
-    setToast({ msg, type });
+  const showToast = (msg: string, type: "success" | "info" | "alert" | "error" = "info") => {
+    setToast({ msg, type: type === "error" ? "alert" : type });
   };
 
   // ─── Notification Reminder Feature ──────────────────────────────────────────
@@ -8049,42 +8183,52 @@ export default function App() {
     return () => clearInterval(interval);
   }, [notificationsEnabled, events]);
 
-  // Sync state with Live REST API Server
+  // Firebase Auth State Observer
+  useEffect(() => {
+    const unsubscribe = subscribeAuthState((fbUser) => {
+      if (fbUser) {
+        setCurrentUser({
+          id: fbUser.uid,
+          email: fbUser.email || "",
+          fullName: fbUser.displayName || fbUser.email?.split("@")[0] || "User",
+          currency: "IDR",
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Sync state with Firestore Cloud Server & Live REST API Server
   const syncWithBackend = async (silent = false) => {
     if (!currentUser) return;
     setIsSyncing(true);
     try {
-      const headers = { "X-User-Id": currentUser.id };
-      const healthRes = await fetch(`${API_BASE}/health`).catch(() => null);
-      if (healthRes && healthRes.ok) {
-        setApiConnected(true);
-        const [txRes, bgRes, scRes] = await Promise.all([
-          fetch(`${API_BASE}/transactions?userId=${currentUser.id}`, { headers }).catch(() => null),
-          fetch(`${API_BASE}/budgets?userId=${currentUser.id}`, { headers }).catch(() => null),
-          fetch(`${API_BASE}/schedules?userId=${currentUser.id}`, { headers }).catch(() => null),
-        ]);
+      // 1. Try Firestore Cloud sync
+      const [fsTxs, fsBgs, fsScs] = await Promise.all([
+        getFirebaseUserTransactions(currentUser.id).catch(() => null),
+        getFirebaseUserBudgets(currentUser.id).catch(() => null),
+        getFirebaseUserSchedules(currentUser.id).catch(() => null),
+      ]);
 
-        if (txRes && txRes.ok) {
-          const txData = await txRes.json();
-          if (Array.isArray(txData.data)) setTransactions(txData.data);
-        }
-        if (bgRes && bgRes.ok) {
-          const bgData = await bgRes.json();
-          if (Array.isArray(bgData.data) && bgData.data.length > 0) setBudget(bgData.data);
-        }
-        if (scRes && scRes.ok) {
-          const scData = await scRes.json();
-          if (Array.isArray(scData.data)) setEvents(scData.data);
-        }
+      // Firestore connected successfully — mark active regardless of data count
+      setApiConnected(true);
 
-        if (!silent) {
-          showToast("Data pribadi berhasil tersinkronisasi dengan REST API Server", "success");
-        }
-      } else {
-        setApiConnected(false);
-        if (!silent) {
-          showToast("Menggunakan Mode Offline (LocalStorage)", "info");
-        }
+      if (fsTxs && Array.isArray(fsTxs) && fsTxs.length > 0) {
+        setTransactions(fsTxs as Transaction[]);
+      }
+      if (fsBgs && Array.isArray(fsBgs) && fsBgs.length > 0) {
+        setBudget(fsBgs as BudgetItem[]);
+      }
+      if (fsScs && Array.isArray(fsScs) && fsScs.length > 0) {
+        setEvents(fsScs as ScheduleEvent[]);
+      }
+
+      const hasData = (fsTxs && (fsTxs as any[]).length > 0) ||
+                      (fsBgs && (fsBgs as any[]).length > 0) ||
+                      (fsScs && (fsScs as any[]).length > 0);
+
+      if (!silent && hasData) {
+        showToast("Data tersinkronisasi dengan Cloud Firestore 🔥", "success");
       }
     } catch (err) {
       setApiConnected(false);
@@ -8101,6 +8245,7 @@ export default function App() {
   }, [currentUser?.id]);
 
   const handleLogout = () => {
+    logoutFirebase().catch(() => null);
     setCurrentUser(null);
     setTransactions([]);
     setEvents([]);
@@ -8110,11 +8255,51 @@ export default function App() {
     showToast("Anda telah keluar dari akun.", "info");
   };
 
-  // CRUD Actions with API syncing
+  // ─── Import Backup Handler ─────────────────────────────────────────────────
+  // Updates React state directly (avoids reload race with Firestore sync)
+  // and also pushes the imported data to Firestore when a user is signed in.
+  const handleImportData = async (data: {
+    transactions: Transaction[];
+    budget: BudgetItem[];
+    events: ScheduleEvent[];
+  }) => {
+    const { transactions: txs, budget: bgs, events: evts } = data;
+
+    // Update React state immediately so UI reflects the imported data
+    if (txs.length > 0) setTransactions(txs);
+    if (bgs.length > 0) setBudget(bgs);
+    if (evts.length > 0) setEvents(evts);
+
+    // Also write to localStorage so offline mode stays consistent
+    if (txs.length > 0) localStorage.setItem("mft_transactions", JSON.stringify(txs));
+    if (bgs.length > 0) localStorage.setItem("mft_budget", JSON.stringify(bgs));
+    if (evts.length > 0) localStorage.setItem("mft_events", JSON.stringify(evts));
+
+    // If user is signed in, push the imported data to Firestore
+    if (currentUser?.id) {
+      const uid = currentUser.id;
+      try {
+        await Promise.all([
+          ...txs.map((tx) => saveFirebaseTransaction(uid, tx).catch(() => null)),
+          ...bgs.map((bg) => saveFirebaseBudget(uid, bg).catch(() => null)),
+          ...evts.map((ev) => saveFirebaseSchedule(uid, ev).catch(() => null)),
+        ]);
+      } catch (e) {
+        console.warn("Partial Firestore push after import failed", e);
+      }
+    }
+  };
+
+  // CRUD Actions with Firestore & API syncing
   const addTransaction = async (tx: Omit<Transaction, "id">) => {
     const newId = Date.now().toString();
     const newTx = { ...tx, id: newId, userId: currentUser?.id || "u1" };
     setTransactions(prev => [newTx, ...prev]);
+
+    // Firestore Sync
+    if (currentUser?.id) {
+      saveFirebaseTransaction(currentUser.id, newTx).catch(e => console.warn("Firestore save tx failed", e));
+    }
 
     if (apiConnected) {
       try {
@@ -8131,6 +8316,10 @@ export default function App() {
 
   const deleteTransaction = async (id: string) => {
     setTransactions(prev => prev.filter(t => t.id !== id));
+    
+    // Firestore Delete
+    deleteFirebaseTransaction(id).catch(e => console.warn("Firestore delete tx failed", e));
+
     if (apiConnected) {
       try {
         await fetch(`${API_BASE}/transactions/${id}`, { method: "DELETE" });
@@ -8142,6 +8331,12 @@ export default function App() {
 
   const updateTransaction = async (updatedTx: Transaction) => {
     setTransactions(prev => prev.map(t => (t.id === updatedTx.id ? updatedTx : t)));
+    
+    // Firestore Update
+    if (currentUser?.id) {
+      saveFirebaseTransaction(currentUser.id, updatedTx).catch(e => console.warn("Firestore update tx failed", e));
+    }
+
     if (apiConnected) {
       try {
         await fetch(`${API_BASE}/transactions/${updatedTx.id}`, {
@@ -8159,6 +8354,9 @@ export default function App() {
     setBudget(prev => {
       const updated = prev.map(b => (b.id === id ? { ...b, limit } : b));
       const target = updated.find(b => b.id === id);
+      if (target && currentUser?.id) {
+        saveFirebaseBudget(currentUser.id, target).catch(() => null);
+      }
       if (target && apiConnected) {
         fetch(`${API_BASE}/budgets`, {
           method: "POST",
@@ -8173,6 +8371,9 @@ export default function App() {
   const addBudget = async (b: Omit<BudgetItem, "id">) => {
     const newB = { ...b, id: Date.now().toString(), userId: currentUser?.id };
     setBudget(prev => [...prev, newB]);
+    if (currentUser?.id) {
+      saveFirebaseBudget(currentUser.id, newB).catch(e => console.warn("Firestore save budget failed", e));
+    }
     if (apiConnected) {
       try {
         await fetch(`${API_BASE}/budgets`, {
@@ -8188,6 +8389,7 @@ export default function App() {
 
   const deleteBudget = async (id: string) => {
     setBudget(prev => prev.filter(b => b.id !== id));
+    deleteFirebaseBudget(id).catch(e => console.warn("Firestore delete budget failed", e));
     if (apiConnected) {
       try {
         await fetch(`${API_BASE}/budgets/${id}`, { method: "DELETE" });
@@ -8200,6 +8402,9 @@ export default function App() {
   const addEvent = async (ev: Omit<ScheduleEvent, "id">) => {
     const newEv = { ...ev, id: Date.now().toString(), userId: currentUser?.id };
     setEvents(prev => [...prev, newEv]);
+    if (currentUser?.id) {
+      saveFirebaseSchedule(currentUser.id, newEv).catch(e => console.warn("Firestore save schedule failed", e));
+    }
     if (apiConnected) {
       try {
         await fetch(`${API_BASE}/schedules`, {
@@ -8214,7 +8419,14 @@ export default function App() {
   };
 
   const toggleEvent = async (id: string) => {
-    setEvents(prev => prev.map(e => (e.id === id ? { ...e, done: !e.done } : e)));
+    setEvents(prev => {
+      const updated = prev.map(e => (e.id === id ? { ...e, done: !e.done } : e));
+      const target = updated.find(e => e.id === id);
+      if (target && currentUser?.id) {
+        saveFirebaseSchedule(currentUser.id, target).catch(() => null);
+      }
+      return updated;
+    });
     if (apiConnected) {
       try {
         await fetch(`${API_BASE}/schedules/${id}/toggle`, { method: "PATCH" });
@@ -8226,6 +8438,7 @@ export default function App() {
 
   const deleteEvent = (id: string) => {
     setEvents(prev => prev.filter(e => e.id !== id));
+    deleteFirebaseSchedule(id).catch(() => null);
   };
 
   const handleResetData = () => {
@@ -8233,12 +8446,18 @@ export default function App() {
   };
 
   const confirmResetData = () => {
+    logoutFirebase().catch(() => null);
+    setCurrentUser(null);
     setTransactions([]);
     setEvents([]);
+    setBudget(INITIAL_BUDGET);
+    localStorage.removeItem("mft_user");
+    localStorage.removeItem("mft_registered_users");
     localStorage.removeItem("mft_transactions");
     localStorage.removeItem("mft_events");
+    localStorage.removeItem("mft_budget");
     setShowResetConfirm(false);
-    showToast("Seluruh transaksi & catatan telah dibersihkan", "info");
+    showToast("Seluruh data akun lokal & transaksi telah di-reset. Siap untuk migrasi Firebase 🔥", "info");
   };
 
   const tabs: { id: Tab; icon: React.ReactNode; label: string }[] = [
@@ -8386,6 +8605,7 @@ export default function App() {
                 setCurrentUser(updated);
                 localStorage.setItem("mft_user", JSON.stringify(updated));
               }}
+              onImportData={handleImportData}
               darkMode={darkMode}
               onToggleDarkMode={handleToggleDarkMode}
               themeColor={themeColor}
